@@ -1,0 +1,10 @@
+# binaries
+/bin/
+demo-server
+loadgen
+
+# test & profile artifacts
+*.test
+*.out
+*.prof
+coverage.*
