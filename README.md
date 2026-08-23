@@ -8,10 +8,22 @@ ending at a Redis-coordinated limiter that leases quota — and measures every s
 stage is a working implementation with benchmarks, and the multi-instance bug is
 expressed as a *failing test* rather than a paragraph of prose.
 
-> **Status: early.** Phases 0–1 of 8 are complete — the `Limiter` contract, the clock
-> abstraction, the conformance suite every implementation is graded against, and a
-> fixed-window limiter that admits **199 requests in 1 ms against a limit of 100 per
-> minute**. See [`PLAN.md`](PLAN.md) for the full roadmap.
+> **Status: early.** Phases 0–2 of 8 are complete — the `Limiter` contract, the clock
+> abstraction, the conformance suite every implementation is graded against, and two
+> limiters. See [`PLAN.md`](PLAN.md) for the full roadmap.
+
+Given the same configuration — 100 requests per minute — and the same test, run at a
+window boundary:
+
+| Implementation | Admitted within 1 ms | |
+|---|---|---|
+| `fixedwindow` | **199** | 2.0× the configured limit |
+| `tokenbucket` | **100** | 1.0× — its burst, and no more |
+
+Both pass the identical conformance suite. The fixed window is not buggy; its guarantee
+was "100 per aligned window", which is not the guarantee anyone thought they were
+configuring. See [docs/01](docs/01-mutex-and-fixed-windows.md) and
+[docs/02](docs/02-token-bucket.md).
 
 ## Why this exists
 
@@ -48,7 +60,7 @@ are in the interface from the start.
 |---|---|---|
 | 0 | Contract, clock abstraction, conformance suite | ✅ |
 | 1 | Mutex + counter — and the fixed-window boundary burst | ✅ |
-| 2 | Token bucket — lazy refill, burst vs sustained rate | |
+| 2 | Token bucket — lazy refill, burst vs sustained rate | ✅ |
 | 3 | Concurrency: global mutex → sharded → per-key atomics, benchmarked | |
 | 4 | Sliding window (log and counter), GCRA — a comparison with numbers | |
 | 5 | The break: three instances, one limit, triple the traffic admitted | |
@@ -72,3 +84,4 @@ Design notes are written during each phase rather than after, and live in
 
 - [00 — Foundations: designing the contract before the implementation](docs/00-foundations.md)
 - [01 — Mutex and fixed windows: correct, and still wrong](docs/01-mutex-and-fixed-windows.md)
+- [02 — Token bucket: making burst a decision instead of an accident](docs/02-token-bucket.md)

@@ -47,7 +47,7 @@ type Limiter struct {
 // window is one key's state: when its current window opened, and how many
 // units have been admitted since.
 type window struct {
-	start  time.Time
+	start time.Time
 	count int
 }
 
