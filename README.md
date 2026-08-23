@@ -8,9 +8,10 @@ ending at a Redis-coordinated limiter that leases quota — and measures every s
 stage is a working implementation with benchmarks, and the multi-instance bug is
 expressed as a *failing test* rather than a paragraph of prose.
 
-> **Status: early.** Phase 0 of 8 is complete — the `Limiter` contract, the clock
-> abstraction, and the conformance suite every implementation is graded against. No
-> limiter is implemented yet. See [`PLAN.md`](PLAN.md) for the full roadmap.
+> **Status: early.** Phases 0–1 of 8 are complete — the `Limiter` contract, the clock
+> abstraction, the conformance suite every implementation is graded against, and a
+> fixed-window limiter that admits **199 requests in 1 ms against a limit of 100 per
+> minute**. See [`PLAN.md`](PLAN.md) for the full roadmap.
 
 ## Why this exists
 
@@ -46,7 +47,7 @@ are in the interface from the start.
 | Phase | Subject | Status |
 |---|---|---|
 | 0 | Contract, clock abstraction, conformance suite | ✅ |
-| 1 | Mutex + counter — and the fixed-window boundary burst | |
+| 1 | Mutex + counter — and the fixed-window boundary burst | ✅ |
 | 2 | Token bucket — lazy refill, burst vs sustained rate | |
 | 3 | Concurrency: global mutex → sharded → per-key atomics, benchmarked | |
 | 4 | Sliding window (log and counter), GCRA — a comparison with numbers | |
@@ -70,3 +71,4 @@ Design notes are written during each phase rather than after, and live in
 [`docs/`](docs/):
 
 - [00 — Foundations: designing the contract before the implementation](docs/00-foundations.md)
+- [01 — Mutex and fixed windows: correct, and still wrong](docs/01-mutex-and-fixed-windows.md)
