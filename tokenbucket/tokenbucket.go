@@ -71,7 +71,9 @@ func (l *Limiter) AllowN(_ context.Context, key string, n int) (ratelimit.Decisi
 	// lock-acquisition order.
 	now := l.clock.Now()
 
-	// TODO(phase-3b): unbounded map growth.
+	// This map is unbounded by design. sharded implements eviction; this
+	// package stays the unswept baseline its sweep cost is measured against,
+	// so it is not suitable for attacker-controlled keys.
 	s, ok := l.buckets[key]
 	if !ok {
 		st := l.params.New(now)

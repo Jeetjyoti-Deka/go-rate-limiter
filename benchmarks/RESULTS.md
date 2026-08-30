@@ -135,6 +135,33 @@ At a million tracked keys that is 67 MB versus 172 MB, for the same limiter.
 
 ---
 
+## What eviction costs
+
+`sharded` sweeps idle keys on a ticker. The recurring price is a full scan of every key,
+paid each interval whether or not anything is reclaimed, so that worst case is what gets
+measured: 100,000 live keys, none of them evictable.
+
+```
+BenchmarkSweepScan    895    1339948 ns/op    0 B/op    0 allocs/op
+```
+
+**1.34 ms to scan 100,000 keys — about 13.4 ns each, with zero allocations.**
+
+Put in context: at a one-minute sweep interval that is 0.002% of a core. Even sweeping
+every second it is 0.13%. The scan is effectively free, which is the expected result for
+a map walk comparing one `time.Time` per entry and allocating nothing.
+
+The number that matters more than the total is the *pause*. Shards are locked one at a
+time, so no request ever waits behind a whole scan — only behind its own shard's slice of
+it, around 21 µs at 64 shards. Sharding pays off twice: once for throughput, again for
+keeping the sweep from becoming a stop-the-world event.
+
+Eviction is therefore not a performance tradeoff in either direction. It costs almost
+nothing to run, and because a bucket idle past its recovery time is indistinguishable from
+a fresh one, it costs nothing in accuracy either.
+
+---
+
 ## Contention, shown
 
 ```

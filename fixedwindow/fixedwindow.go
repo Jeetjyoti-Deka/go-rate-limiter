@@ -94,8 +94,9 @@ func (l *Limiter) AllowN(_ context.Context, key string, n int) (ratelimit.Decisi
 	// larger than the window.
 	now := l.clock.Now()
 
-	// TODO(phase-3): this map only ever grows. Keyed by IP, that is a memory
-	// exhaustion vector. Eviction lands in Phase 3.
+	// This map only ever grows. Keyed by IP that is a memory exhaustion
+	// vector, and it is left unfixed deliberately: this package is the Phase 1
+	// exhibit, kept as it was written. sharded carries the eviction.
 	w, ok := l.windows[key]
 	if !ok {
 		w = &window{start: now}

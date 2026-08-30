@@ -8,9 +8,10 @@ ending at a Redis-coordinated limiter that leases quota — and measures every s
 stage is a working implementation with benchmarks, and the multi-instance bug is
 expressed as a *failing test* rather than a paragraph of prose.
 
-> **Status: early.** Phases 0–2 of 8 are complete — the `Limiter` contract, the clock
-> abstraction, the conformance suite every implementation is graded against, and two
-> limiters. See [`PLAN.md`](PLAN.md) for the full roadmap.
+> **Status: in progress.** Phases 0–3 of 8 are complete — the `Limiter` contract, the
+> clock abstraction, the conformance suite every implementation is graded against, four
+> limiters, and a measured comparison of three synchronisation strategies. See
+> [`PLAN.md`](PLAN.md) for the full roadmap.
 
 Given the same configuration — 100 requests per minute — and the same test, run at a
 window boundary:
@@ -61,7 +62,7 @@ are in the interface from the start.
 | 0 | Contract, clock abstraction, conformance suite | ✅ |
 | 1 | Mutex + counter — and the fixed-window boundary burst | ✅ |
 | 2 | Token bucket — lazy refill, burst vs sustained rate | ✅ |
-| 3 | Concurrency: global mutex → sharded → per-key atomics, benchmarked | |
+| 3 | Concurrency: global mutex → sharded → per-key, benchmarked; idle-key eviction | ✅ |
 | 4 | Sliding window (log and counter), GCRA — a comparison with numbers | |
 | 5 | The break: three instances, one limit, triple the traffic admitted | |
 | 6 | Redis-backed, atomically — why `GET`/`SET` is not enough | |
@@ -85,3 +86,5 @@ Design notes are written during each phase rather than after, and live in
 - [00 — Foundations: designing the contract before the implementation](docs/00-foundations.md)
 - [01 — Mutex and fixed windows: correct, and still wrong](docs/01-mutex-and-fixed-windows.md)
 - [02 — Token bucket: making burst a decision instead of an accident](docs/02-token-bucket.md)
+- [03 — Concurrency: three strategies, measured](docs/03-concurrency.md)
+  · [benchmark results](benchmarks/RESULTS.md)
