@@ -117,10 +117,11 @@ func testReplenishesOverTime(t *testing.T, f Factory) {
 		t.Fatal("limiter not exhausted; test precondition failed")
 	}
 
-	// A full idle window must restore capacity. Algorithms differ in *how*
-	// they replenish (a fixed window resets, a token bucket drips), so the
-	// suite only asserts the property they share.
-	clk.Advance(window)
+	// A sufficiently long idle period must restore capacity. Two windows, not
+	// one: a sliding window counter still sees the exhausted count one window
+	// later, and is right to. Algorithms differ in how they replenish, so the
+	// suite asserts only the property they share.
+	clk.Advance(2 * window)
 
 	if d := mustAllow(t, l, "k"); !d.Allowed {
 		t.Fatal("limiter did not replenish after a full idle window; " +
@@ -188,8 +189,13 @@ func testRetryAfterOnlyWhenDenied(t *testing.T, f Factory) {
 		t.Error("RetryAfter must be positive on a denied request; " +
 			"a client told to retry after 0 will hot-loop")
 	}
-	if d.RetryAfter > window {
-		t.Errorf("RetryAfter = %v exceeds the window %v", d.RetryAfter, window)
+	// RetryAfter is time until this request could succeed; ResetAfter is time
+	// until the key is fully replenished. The first can never exceed the
+	// second, for any algorithm. A window bound was tried here first and is
+	// not universal: a sliding window counter legitimately reports more than
+	// one window. See docs/04-algorithm-comparison.md.
+	if d.RetryAfter > d.ResetAfter {
+		t.Errorf("RetryAfter = %v exceeds ResetAfter = %v", d.RetryAfter, d.ResetAfter)
 	}
 }
 
