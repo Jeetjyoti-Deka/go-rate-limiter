@@ -135,8 +135,20 @@ degenerates to a wait-free read.
 That inverts the usual failure mode. A mutex-based limiter contends hardest exactly when
 it is rejecting the most traffic, because every rejection still takes the lock.
 
+It is also visible in the measurements, more starkly than expected. On a drained hot key,
+**GCRA is the only limiter in this repository that gets faster as cores are added** —
+3.53× from one core to four, while every mutex-based algorithm slows down by the ~15% that
+lock handoff costs. At four cores it rejects in 20.7 ns against the token bucket's 119.8,
+which is 48 million rejections per second against 8 million.
+
+One honest qualification: on a **single** core GCRA is unremarkable, at 72.97 ns against
+the fixed window's 70.94. There is no clever arithmetic here making it intrinsically
+faster. The entire advantage is that it does not serialise, so it only appears when
+something is contending.
+
 The Phase 3 ceiling turns out not to have been about synchronisation strategy at all. It
-was about the size of the state the algorithm needs.
+was about the size of the state the algorithm needs — though, as the comparison below
+shows, small state buys concurrency rather than memory.
 
 ---
 
@@ -193,28 +205,64 @@ destroyed its meaning.
 
 ## Comparison
 
+All figures measured; method and full tables in
+[`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md).
+
 | | Fixed window | Sliding log | Sliding counter | Token bucket | GCRA |
 |---|---|---|---|---|---|
-| **Accuracy** | 2× burst at boundary | exact | ~0.003% error | exact to burst | exact to burst |
-| **State per key** | ~40 B | 24 B × limit | ~40 B | ~67 B | **8 B** |
+| **Accuracy** | 2× at boundary | exact | ~0.003% error | exact to burst | exact to burst |
+| **Admitted in 1 ms** | **199** | 100 | 99 | 100 | 100 |
+| **Footprint/key** | 67 B | **24.7 KB** | 83 B | 67 B | 127 B |
 | **Scales with limit** | no | **yes** | no | no | no |
 | **Burst control** | none | none | none | explicit | explicit |
+| **Denial, 4 cores** | 85.9 ns | 109.5 ns | 100.6 ns | 119.8 ns | **20.7 ns** |
+| **Scaling, 1→4 cores** | 0.83× | 0.87× | 0.85× | 0.86× | **3.53×** |
 | **Lock-free** | no | no | no | no | **yes** |
 | **Denials write state** | yes | yes | yes | yes | **no** |
 
-Measured throughput and per-key memory are in
-[`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md).
+Footprints are at limit = 1000; the sliding log's is the only one that moves with the
+limit, at 24.6 bytes per stored timestamp — the size of a `time.Time`.
+
+### Small state does not mean small footprint
+
+The comparison table contains a result worth stopping on, because it contradicts what the
+section above would lead you to expect.
+
+GCRA's state is 8 bytes against the token bucket's 32. Its measured footprint is **127
+bytes per key against the token bucket's 67** — nearly double, in three allocations
+rather than one.
+
+The state shrank; the container grew. Being lock-free requires a container that is also
+lock-free, which here means `sync.Map` — and `sync.Map` boxes every value in an interface
+and maintains read and dirty maps that both hold live entries. That is the same
+three-allocation overhead that made `perkey` cost 172 bytes per key in Phase 3. A token
+bucket in a plain mutex-guarded map pays for one allocation and no boxing.
+
+So the accurate claim is narrower than "GCRA is cheap": **a small state only buys a small
+footprint when the container is cheap too, and lock-freedom rules out the cheap
+container.** GCRA is making the same memory-for-concurrency trade `perkey` made. It simply
+gets far more in return — 3.53× scaling instead of a mutex, at 127 bytes instead of 172.
+
+This is the second time in the project that measuring contradicted a reasonable-sounding
+inference from first principles. The first was Phase 3, where per-key locking won every
+latency benchmark and was still the wrong default.
 
 ### Choosing
 
 - **Small limit, exactness required** — sliding log. 5 logins per hour, 3 password resets
-  per day. The memory is trivial at those numbers and being exactly right is the point.
-- **Large limit, many keys, public API** — sliding counter. Constant memory, error small
-  enough to be uninteresting.
-- **You care about burst shape** — token bucket or GCRA, which are the only two that let
-  you set sustained rate and instantaneous burst independently.
-- **High contention, or overload is the common case** — GCRA. Smallest state, no lock, and
-  rejections cost a single atomic load.
+  per day. At limit = 10 it costs 323 bytes per key, which is nothing, and being exactly
+  right is the whole point. Never use it with a large limit: the same algorithm at
+  limit = 1000 costs 24.7 KB per key, and at a million keys that is 24 GB.
+- **Large limit, many keys, public API** — sliding counter. 83 bytes per key at any limit,
+  with an error small enough to be uninteresting.
+- **You care about burst shape** — token bucket or GCRA, the only two that let you set
+  sustained rate and instantaneous burst independently.
+- **High contention, or overload is the common case** — GCRA. Not because its footprint is
+  small (it is not — 127 bytes, nearly double a token bucket) but because rejections cost
+  one atomic load and take no lock, so throughput rises with core count instead of
+  falling.
+- **Low concurrency** — anything. At one core the five are within 1.7× of each other, and
+  the choice should be made on accuracy and memory alone.
 
 The fixed window from Phase 1 is on this table for completeness. There is no workload where
 it is the right answer: the sliding counter costs the same memory and does not have the

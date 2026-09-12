@@ -1,10 +1,19 @@
-# Benchmark results — Phase 3
+# Benchmark results
 
-Measured comparison of three synchronisation strategies wrapping an identical token
-bucket. The arithmetic lives in `internal/bucket` and is called by all three, so every
-difference below is attributable to locking alone.
+Two independent comparisons, deliberately kept apart so each has exactly one variable:
 
-Reasoning and design: [`docs/03-concurrency.md`](../docs/03-concurrency.md).
+- **[Phase 3](#phase-3--synchronisation)** — three synchronisation strategies wrapping an
+  identical token bucket. The arithmetic lives in `internal/bucket` and is called by all
+  three, so every difference is attributable to locking alone.
+  ([`docs/03-concurrency.md`](../docs/03-concurrency.md))
+- **[Phase 4](#phase-4--algorithms)** — five algorithms, each in its natural
+  implementation. ([`docs/04-algorithm-comparison.md`](../docs/04-algorithm-comparison.md))
+
+Both run on the environment described immediately below.
+
+---
+
+# Phase 3 — synchronisation
 
 ---
 
@@ -263,3 +272,134 @@ go tool pprof -top -nodecount=15 bench.test mutex.out
 `BenchmarkMemoryPerKey` needs an explicit iteration count: at Go's adaptively chosen `b.N`
 the three strategies would be measured at different key counts, and small `b.N` makes the
 per-key figure noise.
+
+---
+
+# Phase 4 — algorithms
+
+Five algorithms, each in its natural implementation. Four use a global mutex; GCRA is
+lock-free, which is a consequence of its state fitting in one word rather than a thumb on
+the scale.
+
+Kept in a separate harness (`algorithm_bench_test.go`) from the Phase 3 one. Folding both
+into a single list of implementations would vary algorithm and synchronisation at once and
+make every difference ambiguous.
+
+## Burst at a window boundary
+
+The Phase 1 test, structurally unchanged, run against every algorithm. 100 per minute,
+measured across a 1 ms span containing a boundary:
+
+| | admitted | |
+|---|---|---|
+| `fixedwindow` | **199** | 2.0× the limit |
+| `tokenbucket` | 100 | its burst |
+| `windowlog` | 100 | exact |
+| `windowcounter` | 99 | approximate, erring strict here |
+| `gcra` | 100 | its burst |
+
+The fixed window is alone in exceeding its configured limit, and it is not a bug: its
+guarantee was per aligned window, which is not the guarantee anyone thought they were
+setting.
+
+## The overload path
+
+One hot key, drained before timing starts, so every measured request is rejected. This is
+the case a limiter faces when it matters most.
+
+ns/op, lower is better:
+
+| | -1 | -2 | -4 | 1→4 cores |
+|---|---|---|---|---|
+| FixedWindow | 70.94 | 81.09 | 85.89 | 0.83× |
+| TokenBucket | 102.7 | 117.0 | 119.8 | 0.86× |
+| WindowLog | 95.33 | 106.2 | 109.5 | 0.87× |
+| WindowCounter | 85.20 | 93.43 | 100.6 | 0.85× |
+| **GCRA** | 72.97 | 37.30 | **20.70** | **3.53×** |
+
+Zero allocations per operation throughout.
+
+**GCRA is the only limiter in this repository that gets faster as cores are added.** The
+four mutex-based algorithms all degrade by roughly the same 15%, because a rejection still
+takes the lock — the identical negative-scaling signature Phase 3 found. GCRA's rejection
+path is an atomic load, a comparison, and a return, with nothing written and nothing
+contended, so four cores do four cores' worth of work.
+
+At four cores: **48.3M rejections/sec against the token bucket's 8.3M**, a 5.8× gap.
+
+The qualification matters as much as the result. On a single core GCRA is unremarkable —
+72.97 ns against the fixed window's 70.94. Nothing about its arithmetic is faster. The
+entire advantage is not serialising, and it appears only when something contends.
+
+There is deliberately **no sustained-admit counterpart** to this benchmark. A sliding
+window log physically cannot admit more than its limit within a window, and raising the
+limit enough to survive millions of iterations would allocate a ring of that many
+timestamps. Cold-path admission cost is captured below as the memory benchmark's ns/op.
+
+## Memory per key
+
+Retained bytes per key, swept across the limit because one algorithm's footprint depends
+on it. 50,000 distinct keys, `-cpu=1`:
+
+| | limit=10 | limit=100 | limit=1000 | allocs |
+|---|---|---|---|---|
+| FixedWindow | 66.95 | 66.95 | 66.95 | 1 |
+| TokenBucket | 66.95 | 66.95 | 66.95 | 1 |
+| **WindowLog** | 322.9 | 2,771 | **24,659** | 2 |
+| WindowCounter | 82.95 | 82.95 | 82.95 | 1 |
+| GCRA | 127.4 | 127.2 | 127.2 | 3 |
+
+Cold first-touch admission, ns/op:
+
+| | limit=10 | limit=100 | limit=1000 |
+|---|---|---|---|
+| FixedWindow | 348.8 | 320.4 | 331.5 |
+| TokenBucket | 307.3 | 330.0 | 336.9 |
+| **WindowLog** | 798.7 | 4,586 | **12,373** |
+| WindowCounter | 326.8 | 269.3 | 260.1 |
+| GCRA | 327.9 | 356.7 | 299.0 |
+
+**The sliding window log scales exactly as theory predicts.** Subtract the container
+overhead and it is 24.6 bytes per stored timestamp — the size of a `time.Time`. At
+limit = 1000 that is 24.7 KB per key, 368× a token bucket, and at a million keys it is
+24 GB. Its insertion cost scales too, since allocating and zeroing the ring is O(limit).
+
+That is the price of being exactly correct, stated plainly. It is entirely reasonable at
+limit = 10 (323 bytes) and disqualifying at limit = 1000.
+
+## The result that contradicted the prediction
+
+GCRA's state is 8 bytes against the token bucket's 32. Its measured footprint is **127
+bytes per key against the token bucket's 67** — nearly double, in three allocations
+rather than one.
+
+The state shrank and the container grew. Lock-freedom requires a lock-free container,
+which here is `sync.Map`: it boxes every value in an interface and maintains read and
+dirty maps that both reference live entries. Those are the same three allocations that
+made `perkey` cost 172 B/key in Phase 3. A token bucket in a plain mutex-guarded map pays
+for one allocation and no boxing.
+
+So the defensible claim is narrower than "GCRA is cheap": **a small state only buys a
+small footprint when the container is cheap too, and lock-freedom rules out the cheap
+container.** GCRA makes the same memory-for-concurrency trade `perkey` made, and simply
+gets much more for it — 3.53× scaling rather than a mutex, at 127 bytes rather than 172.
+
+This is the second time measurement has contradicted a sound-looking inference. The first
+was Phase 3, where per-key locking won every latency benchmark and was still the wrong
+default.
+
+## Reproducing
+
+```bash
+go test -count=1 -run 'Boundary' -v \
+  ./fixedwindow/ ./tokenbucket/ ./windowlog/ ./windowcounter/ ./gcra/ | grep admitted
+
+go test -run '^$' -bench BenchmarkAlgorithmDeny -benchmem -cpu=1,2,4 \
+  -benchtime=2s ./benchmarks/
+
+go test -run '^$' -bench BenchmarkAlgorithmMemoryPerKey -benchtime=50000x \
+  -cpu=1 ./benchmarks/
+```
+
+Do not raise `50000x` on the memory sweep: `WindowLog/limit=1000` allocates a
+1000-timestamp ring per key, so 50,000 keys is already about 1.2 GB of rings.
