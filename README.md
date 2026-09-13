@@ -6,12 +6,21 @@ moment you run two copies of it.
 This repository walks that failure into the open — starting from a mutex and a counter,
 ending at a Redis-coordinated limiter that leases quota — and measures every step. Each
 stage is a working implementation with benchmarks, and the multi-instance bug is
-expressed as a *failing test* rather than a paragraph of prose.
+expressed as a *failing test* rather than a paragraph of prose:
 
-> **Status: in progress.** Phases 0–4 of 8 are complete — the `Limiter` contract, the
+```
+$ go test -tags brokenbydesign ./distributed/
+--- FAIL: TestAggregateLimitHolds/tokenbucket
+    3 instances admitted 300 requests against a configured limit of 100:
+    the limit is enforced per instance, not per service
+```
+
+All five algorithms fail it identically, because the defect belongs to none of them.
+
+> **Status: in progress.** Phases 0–5 of 8 are complete — the `Limiter` contract, the
 > clock abstraction, the conformance suite every implementation is graded against, five
-> algorithms, and measured comparisons of both synchronisation strategy and algorithm
-> choice. See [`PLAN.md`](PLAN.md) for the full roadmap.
+> algorithms, measured comparisons of both synchronisation strategy and algorithm choice,
+> and the multi-instance break. See [`PLAN.md`](PLAN.md) for the full roadmap.
 
 Given the same configuration — 100 requests per minute — and the same test, run at a
 window boundary:
@@ -73,7 +82,7 @@ are in the interface from the start.
 | 2 | Token bucket — lazy refill, burst vs sustained rate | ✅ |
 | 3 | Concurrency: global mutex → sharded → per-key, benchmarked; idle-key eviction | ✅ |
 | 4 | Sliding window (log and counter), GCRA — a comparison with numbers | ✅ |
-| 5 | The break: three instances, one limit, triple the traffic admitted | |
+| 5 | The break: three instances, one limit, triple the traffic admitted | ✅ |
 | 6 | Redis-backed, atomically — why `GET`/`SET` is not enough | |
 | 7 | Quota leasing and degradation — fail-open vs fail-closed | |
 | 8 | HTTP middleware, docs, write-up | |
@@ -82,10 +91,35 @@ are in the interface from the start.
 
 ```bash
 go test -race ./...
+
+# the multi-instance break, as a test that fails on purpose
+go test -tags brokenbydesign ./distributed/
 ```
 
 Requires Go 1.25+. Redis (via Docker) becomes a dependency at Phase 6; everything before
 that runs with no external services.
+
+### Seeing the break over real HTTP
+
+Three servers, each told to allow 100 requests per minute, and a load generator
+round-robining across them the way a load balancer would:
+
+```bash
+go run ./cmd/demo-server -addr :8081 -limit 100 -window 1m   # and :8082, :8083
+go run ./cmd/loadgen -n 1000 -limit 100
+```
+
+```
+3 instances, each configured for 100 requests
+sent      1000 in 42ms
+admitted  300
+rejected  700
+
+effective limit: 300 (3.0x the configured 100)
+```
+
+Use a window long enough to outlast the run. With the 1-second default, windows roll
+mid-flight and instance-count multiplication becomes indistinguishable from replenishment.
 
 ## Documentation
 
@@ -99,3 +133,4 @@ Design notes are written during each phase rather than after, and live in
   · [benchmark results](benchmarks/RESULTS.md)
 - [04 — Algorithm comparison: what you buy with memory](docs/04-algorithm-comparison.md)
   · [benchmark results](benchmarks/RESULTS.md#phase-4--algorithms)
+- [05 — Your rate limiter has no idea it has siblings](docs/05-the-multi-instance-break.md)
