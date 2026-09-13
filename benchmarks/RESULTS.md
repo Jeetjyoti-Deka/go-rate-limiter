@@ -1,6 +1,6 @@
 # Benchmark results
 
-Two independent comparisons, deliberately kept apart so each has exactly one variable:
+Three independent comparisons, deliberately kept apart so each has exactly one variable:
 
 - **[Phase 3](#phase-3--synchronisation)** — three synchronisation strategies wrapping an
   identical token bucket. The arithmetic lives in `internal/bucket` and is called by all
@@ -8,8 +8,11 @@ Two independent comparisons, deliberately kept apart so each has exactly one var
   ([`docs/03-concurrency.md`](../docs/03-concurrency.md))
 - **[Phase 4](#phase-4--algorithms)** — five algorithms, each in its natural
   implementation. ([`docs/04-algorithm-comparison.md`](../docs/04-algorithm-comparison.md))
+- **[Phase 6](#phase-6--what-coordination-costs)** — one algorithm, GCRA, with its state
+  in this process and then in Redis.
+  ([`docs/06-redis-atomicity.md`](../docs/06-redis-atomicity.md))
 
-Both run on the environment described immediately below.
+All run on the environment described immediately below.
 
 ---
 
@@ -403,3 +406,65 @@ go test -run '^$' -bench BenchmarkAlgorithmMemoryPerKey -benchtime=50000x \
 
 Do not raise `50000x` on the memory sweep: `WindowLog/limit=1000` allocates a
 1000-timestamp ring per key, so 50,000 keys is already about 1.2 GB of rings.
+
+---
+
+# Phase 6 — what coordination costs
+
+The same algorithm, GCRA, once in this process and once with its state in Redis. The limit
+is set high enough that every request is admitted, so both measure the machinery rather
+than the rejection path, and both use the same window so the emission interval matches.
+
+```
+BenchmarkAllow/InProcessGCRA-4    52133564      73.49 ns/op       0 B/op    0 allocs/op
+BenchmarkAllow/Redis-4               12660     289000   ns/op     648 B/op   17 allocs/op
+```
+
+| | ns/op | allocs |
+|---|---|---|
+| In-process GCRA | **73.49** | 0 |
+| Redis GCRA | **289,000** | 17 |
+
+**Correctness across instances costs roughly 3,930× the latency of a local decision.**
+
+Two qualifications, both of which make the real figure worse rather than better.
+
+**This is loopback.** Redis was running in a container on the same machine, so the
+measurement contains no network hop at all — only syscalls, serialisation, and Redis's own
+execution. A deployment with Redis across a datacentre adds a real round trip; across an
+availability zone, several. Read 3,930× as a floor.
+
+**The 17 allocations belong to the client, not the limiter.** They are go-redis encoding
+the command and parsing the reply. Nothing in `redisstore` allocates per call. Worth
+naming so that nobody optimises the wrong layer: the cost here is the round trip, and no
+amount of tuning the Go side moves it.
+
+## Correctness, which is what the latency bought
+
+| test | load | admitted | limit |
+|---|---|---|---|
+| `TestNaiveOverAdmits` | 100 concurrent, one process | **100** | 10 |
+| `TestAtomicHoldsUnderConcurrency` | 100 concurrent, one process | **10** | 10 |
+| `TestSharedAcrossInstances` | 1000 requests, 3 instances | **100** | 100 |
+
+The first two differ only in whether the read-modify-write happens in one place or three.
+Same arithmetic, same key, same Redis, same load — and one of them admits ten times its
+limit while the other is exact.
+
+The third is the answer to Phase 5. Three independently constructed limiters, sharing
+nothing in-process, pointed at one Redis keyspace, admit exactly the configured limit
+between them. `distributed/aggregate_test.go` asserts precisely this and fails for all five
+in-process algorithms.
+
+## Reproducing
+
+```bash
+docker run -d --name ratelimit-redis -p 6379:6379 redis:7-alpine
+
+go test -run '^$' -bench BenchmarkAllow -benchmem -benchtime=3s ./redisstore/
+go test -race -count=1 ./redisstore/
+```
+
+Redis tests skip when no server is reachable, so `go test ./...` stays green without one —
+which also means a broken Redis setup looks identical to a passing run. Check for `ok`
+rather than the absence of `FAIL`.

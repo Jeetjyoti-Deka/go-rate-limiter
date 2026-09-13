@@ -174,8 +174,13 @@ FAIL
 ```
 
 That output is the whole phase. It is more convincing than this document because it cannot
-be argued with, and because it will keep failing until Phase 7 is finished — at which point
-it becomes the acceptance test for the distributed limiter.
+be argued with.
+
+It also stays red permanently, because in-process state is what these five limiters *are*.
+Its counterpart is `redisstore.TestSharedAcrossInstances`: the same scenario — three
+independently constructed limiters, one shared key — run against state that lives outside
+the process. From Phase 6 onward that one admits exactly the configured limit, which is
+what the rest of this document is arguing has to happen.
 
 There is also a runnable version for people who would rather see processes than
 assertions: `cmd/demo-server` and `cmd/loadgen` do the same thing over real HTTP, three

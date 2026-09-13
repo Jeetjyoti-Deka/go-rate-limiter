@@ -17,10 +17,21 @@ $ go test -tags brokenbydesign ./distributed/
 
 All five algorithms fail it identically, because the defect belongs to none of them.
 
-> **Status: in progress.** Phases 0–5 of 8 are complete — the `Limiter` contract, the
+> **Status: in progress.** Phases 0–6 of 8 are complete — the `Limiter` contract, the
 > clock abstraction, the conformance suite every implementation is graded against, five
-> algorithms, measured comparisons of both synchronisation strategy and algorithm choice,
-> and the multi-instance break. See [`PLAN.md`](PLAN.md) for the full roadmap.
+> in-process algorithms, measured comparisons of both synchronisation strategy and
+> algorithm choice, the multi-instance break, and a Redis-backed limiter that fixes it.
+> See [`PLAN.md`](PLAN.md) for the full roadmap.
+
+Fixing it is not free. The same algorithm, with its state moved from this process into
+Redis on loopback:
+
+| | `Allow` | |
+|---|---|---|
+| in-process | **73.5 ns** | |
+| Redis | **289,000 ns** | ~3,930× |
+
+Which is why Phase 7 exists.
 
 Given the same configuration — 100 requests per minute — and the same test, run at a
 window boundary:
@@ -83,7 +94,7 @@ are in the interface from the start.
 | 3 | Concurrency: global mutex → sharded → per-key, benchmarked; idle-key eviction | ✅ |
 | 4 | Sliding window (log and counter), GCRA — a comparison with numbers | ✅ |
 | 5 | The break: three instances, one limit, triple the traffic admitted | ✅ |
-| 6 | Redis-backed, atomically — why `GET`/`SET` is not enough | |
+| 6 | Redis-backed, atomically — why `GET`/`SET` is not enough | ✅ |
 | 7 | Quota leasing and degradation — fail-open vs fail-closed | |
 | 8 | HTTP middleware, docs, write-up | |
 
@@ -134,3 +145,5 @@ Design notes are written during each phase rather than after, and live in
 - [04 — Algorithm comparison: what you buy with memory](docs/04-algorithm-comparison.md)
   · [benchmark results](benchmarks/RESULTS.md#phase-4--algorithms)
 - [05 — Your rate limiter has no idea it has siblings](docs/05-the-multi-instance-break.md)
+- [06 — Redis, atomically](docs/06-redis-atomicity.md)
+  · [benchmark results](benchmarks/RESULTS.md#phase-6--what-coordination-costs)

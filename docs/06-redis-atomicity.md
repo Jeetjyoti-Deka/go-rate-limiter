@@ -11,16 +11,22 @@
 Moving the counters into Redis is the obvious fix, and obvious fixes deserve their price
 tags written down before they are applied:
 
-| | in-process | Redis |
-|---|---|---|
-| Read-modify-write | ~50 ns, a map lookup | a network round trip |
-| Failure mode | cannot fail | connection refused, timeout, `LOADING` |
-| Availability | same as the process | a new dependency that can take the service down |
-| Concurrency | sharded across 64 locks | one key, one server, single-threaded |
+| | in-process | Redis | |
+|---|---|---|---|
+| `Allow`, measured | **73.5 ns** | **289,000 ns** | ~3,930× |
+| Allocations | 0 | 17 | client encoding and reply parsing |
+| Failure mode | cannot fail | connection refused, timeout, `LOADING` | |
+| Availability | same as the process | a new dependency that can take the service down | |
+| Concurrency | sharded across 64 locks | one key, one server, single-threaded | |
 
 Every one of those is a regression. The only thing bought is correctness — which happens
 to be the thing that was missing, so the trade is worth making. But it is a trade, and
 Phase 7 exists because paying it on *every* request turns out to be unnecessary.
+
+The latency figure deserves one caveat: it was measured against Redis on **loopback, on the
+same machine**, so it contains no network hop at all. It is a floor. A deployment where
+Redis lives across a datacentre is worse, and one where it lives across an availability
+zone is worse again.
 
 ---
 
@@ -52,10 +58,15 @@ There is also no mutex to reach for. `sync.Mutex` excludes goroutines in one add
 it has nothing to say about another process on another machine. The tool that fixed this
 in Phase 1 is simply not available.
 
-`redisstore.NewNaive` implements exactly this, and `TestNaiveOverAdmits` fires a hundred
-concurrent requests at a fresh key with a limit of ten and watches it admit far more. It
-is kept in the repository rather than described, for the same reason the boundary-burst
-test is: a defect you can run is more convincing than a defect you can read about.
+`redisstore.NewNaive` implements exactly this. `TestNaiveIsCorrectWhenSerial` admits
+exactly ten, establishing that the arithmetic is sound. `TestNaiveOverAdmits` then fires a
+hundred concurrent requests at a fresh key with the same limit of ten and admits **all one
+hundred** — not one of them observed another's write.
+
+Phase 5 needed three processes to exceed the limit by 3×. This needs one process and
+concurrency to exceed it by 10×. Both tests are kept in the repository rather than
+described, for the same reason the boundary-burst test is: a defect you can run is more
+convincing than a defect you can read about.
 
 ---
 
