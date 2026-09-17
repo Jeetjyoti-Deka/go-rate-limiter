@@ -1,6 +1,6 @@
 # Benchmark results
 
-Three independent comparisons, deliberately kept apart so each has exactly one variable:
+Four independent comparisons, deliberately kept apart so each has exactly one variable:
 
 - **[Phase 3](#phase-3--synchronisation)** — three synchronisation strategies wrapping an
   identical token bucket. The arithmetic lives in `internal/bucket` and is called by all
@@ -11,8 +11,14 @@ Three independent comparisons, deliberately kept apart so each has exactly one v
 - **[Phase 6](#phase-6--what-coordination-costs)** — one algorithm, GCRA, with its state
   in this process and then in Redis.
   ([`docs/06-redis-atomicity.md`](../docs/06-redis-atomicity.md))
+- **[Phase 7](#phase-7--what-leasing-bought-back)** — the Redis limiter asked for blocks of
+  quota rather than single units, swept across block sizes.
+  ([`docs/07-leasing-and-degradation.md`](../docs/07-leasing-and-degradation.md))
 
-All run on the environment described immediately below.
+All run on the environment described immediately below. Absolute latencies drift by as much
+as 1.6× between runs on this machine, so **compare only within a single table** — the
+Phase 6 and Phase 7 sections each measured the same unleased Redis limiter and got 289 µs
+and 183 µs respectively.
 
 ---
 
@@ -468,3 +474,132 @@ go test -race -count=1 ./redisstore/
 Redis tests skip when no server is reachable, so `go test ./...` stays green without one —
 which also means a broken Redis setup looks identical to a passing run. Check for `ok`
 rather than the absence of `FAIL`.
+
+---
+
+# Phase 7 — what leasing bought back
+
+Phase 6 priced correctness across instances. This prices getting most of the latency back
+by asking the shared limiter for blocks of quota instead of single units.
+
+## Latency, and the dial
+
+One key, admit path, limit high enough that nothing is denied. `redis/op` is a custom
+metric: round trips divided by requests.
+
+```
+BenchmarkLeaseSize/RedisDirect-4     12998   183453    ns/op                    640 B/op  18 allocs/op
+BenchmarkLeaseSize/Leased/1-4        13099   184296    ns/op  1.000    redis/op 640 B/op  18 allocs/op
+BenchmarkLeaseSize/Leased/10-4      127579    18979    ns/op  0.1000   redis/op  64 B/op   1 allocs/op
+BenchmarkLeaseSize/Leased/100-4    1263475     1882    ns/op  0.01000  redis/op   6 B/op   0 allocs/op
+BenchmarkLeaseSize/Leased/1000-4   8808986      272.1  ns/op  0.001000 redis/op   0 B/op   0 allocs/op
+```
+
+| lease size | ns/op | vs direct | redis/op | allocs |
+|---|---|---|---|---|
+| — (direct) | 183,453 | 1× | — | 18 |
+| 1 | 184,296 | 1.00× | **1.000** | 18 |
+| 10 | 18,979 | **9.7×** | **0.1000** | 1 |
+| 100 | 1,882 | **97×** | **0.01000** | 0 |
+| 1000 | 272.1 | **674×** | **0.001000** | 0 |
+
+`redis/op` lands on exactly `1/leaseSize` at every step. The amortisation does precisely
+what the arithmetic says it should.
+
+**Leasing at size 1 costs 0.46%.** That matters more than it looks: the dial can be turned
+down to 1 and the behaviour is Phase 6 again, at no meaningful cost. It is a knob, not a
+different code path with its own risks.
+
+**Allocations fall to zero.** Past lease size 100 the hot path allocates nothing, because
+go-redis's command encoding has disappeared from 99% of requests.
+
+### The returns diminish faster than the costs grow
+
+| step | latency saved |
+|---|---|
+| 1 → 10 | 165,317 ns |
+| 10 → 100 | 17,097 ns |
+| 100 → 1000 | 1,610 ns |
+
+Each 10× increase in lease size saves 10× less latency while costing 10× more accuracy.
+The benefit-to-cost ratio drops by **100× per step**, so the useful range is narrow and it
+sits at the low end.
+
+The floor is visible in the last row. At lease size 1000 the amortised Redis cost is
+183 ns per request but the measured total is 272 ns — roughly **90 ns is the local path
+itself** (a `sync.Map` lookup, a mutex, and some arithmetic). Beyond that point, larger
+leases buy accuracy loss in exchange for latency that is no longer there to recover.
+
+## Accuracy across a fleet
+
+Three instances, each a `leased.Limiter` over its own `redisstore.Limiter`, sharing one
+Redis keyspace. Limit 100, 1000 attempts.
+
+**Uniform load** — round-robin across the three:
+
+| lease | admitted | redis calls | per request |
+|---|---|---|---|
+| 1 | **100 / 100** | 103 | 0.103 |
+| 5 | **100 / 100** | 26 | 0.026 |
+| 20 | **100 / 100** | 11 | 0.011 |
+
+Leasing is **exactly correct** here at every lease size. Instances can only spend what the
+shared limiter granted, and under even load they spend all of it.
+
+The 103 calls at lease size 1 is the denial cache made visible: 100 admissions at one round
+trip each, plus one refusal per instance that every subsequent rejection is served from.
+Without caching it would be 1000. **The limiter got roughly 10× quieter under overload**,
+which is the property the design claims and this is the measurement of it.
+
+**Skewed load** — two instances receive five requests each and then go quiet; the rest
+lands on the third:
+
+| lease | admitted | shortfall | bound |
+|---|---|---|---|
+| 1 | 100 / 100 | 0 | 3 |
+| 5 | 100 / 100 | 0 | 15 |
+| 20 | **70 / 100** | **30** | 60 |
+
+### The bound is not the error
+
+The design bounds fleet-wide drift at `instances × leaseSize`. It holds, and it is loose.
+
+The mechanism is exact and worth stating precisely. Each quiet instance received five
+requests. At lease size 5 it leased five and spent five: **nothing stranded**. At lease size
+20 it leased twenty and spent five: **fifteen stranded**, twice over, for a shortfall of
+exactly 30.
+
+So the realised error is not `instances × leaseSize` but
+
+```
+Σ over instances of  max(0, leaseSize − requests that instance received)
+```
+
+Real traffic rarely approaches the worst case, in which every instance takes a full lease
+and serves nothing. But the worst case is what a configuration has to be safe against,
+which gives a sizing rule the design did not state:
+
+**`instances × leaseSize` must stay well under `limit`, or there is no guarantee left.** At
+limit 100 across three instances, lease size 100 gives a bound of 300 — the possible error
+exceeds the quantity being limited. Even lease size 20 gives a 60% bound and produced a 30%
+shortfall in practice. Something near `leaseSize ≤ limit / (4 × instances)` keeps the worst
+case under a quarter.
+
+## A note on comparing across runs
+
+`RedisDirect` measures **183 µs** here and **289 µs** in the Phase 6 table. Same code, same
+machine, different run — container state, page cache, and the Windows scheduler under WSL2
+account for roughly 1.6× of run-to-run variance on absolute latency.
+
+**Only within-run comparisons are valid.** `Leased/100` being 97× faster than `RedisDirect`
+is sound because both were measured in the same process, seconds apart. Reading 1,882 ns
+against Phase 6's 289,000 ns would silently inflate the result by that same 1.6×.
+
+## Reproducing
+
+```bash
+docker run -d --name ratelimit-redis -p 6379:6379 redis:7-alpine
+
+go test -run '^$' -bench BenchmarkLeaseSize -benchmem -benchtime=2s ./leased/
+go test -count=1 -v -run TestFleetAccuracy ./leased/
+```

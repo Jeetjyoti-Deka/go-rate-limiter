@@ -17,21 +17,28 @@ $ go test -tags brokenbydesign ./distributed/
 
 All five algorithms fail it identically, because the defect belongs to none of them.
 
-> **Status: in progress.** Phases 0–6 of 8 are complete — the `Limiter` contract, the
+> **Status: in progress.** Phases 0–7 of 8 are complete — the `Limiter` contract, the
 > clock abstraction, the conformance suite every implementation is graded against, five
 > in-process algorithms, measured comparisons of both synchronisation strategy and
-> algorithm choice, the multi-instance break, and a Redis-backed limiter that fixes it.
-> See [`PLAN.md`](PLAN.md) for the full roadmap.
+> algorithm choice, the multi-instance break, a Redis-backed limiter that fixes it, and a
+> leasing layer that recovers most of what the fix cost. See [`PLAN.md`](PLAN.md) for the
+> full roadmap.
 
 Fixing it is not free. The same algorithm, with its state moved from this process into
-Redis on loopback:
+Redis on loopback, costs about **3,930×** the latency of a local decision.
 
-| | `Allow` | |
+Most of that is coordination nobody asked for. Claiming quota in blocks instead of single
+units, measured in one run against the same unleased limiter:
+
+| lease size | `Allow` | Redis calls per request |
 |---|---|---|
-| in-process | **73.5 ns** | |
-| Redis | **289,000 ns** | ~3,930× |
+| unleased | 183,453 ns | 1 |
+| 10 | 18,979 ns | 0.1 |
+| 100 | **1,882 ns** | **0.01** |
 
-Which is why Phase 7 exists.
+What it costs is accuracy, bounded at `instances × leaseSize` and measurably zero under
+even load. That trade — and when it stops being worth taking — is
+[docs/07](docs/07-leasing-and-degradation.md).
 
 Given the same configuration — 100 requests per minute — and the same test, run at a
 window boundary:
@@ -95,7 +102,7 @@ are in the interface from the start.
 | 4 | Sliding window (log and counter), GCRA — a comparison with numbers | ✅ |
 | 5 | The break: three instances, one limit, triple the traffic admitted | ✅ |
 | 6 | Redis-backed, atomically — why `GET`/`SET` is not enough | ✅ |
-| 7 | Quota leasing and degradation — fail-open vs fail-closed | |
+| 7 | Quota leasing and degradation — fail-open vs fail-closed | ✅ |
 | 8 | HTTP middleware, docs, write-up | |
 
 ## Running the tests
@@ -147,3 +154,5 @@ Design notes are written during each phase rather than after, and live in
 - [05 — Your rate limiter has no idea it has siblings](docs/05-the-multi-instance-break.md)
 - [06 — Redis, atomically](docs/06-redis-atomicity.md)
   · [benchmark results](benchmarks/RESULTS.md#phase-6--what-coordination-costs)
+- [07 — Buying less coordination](docs/07-leasing-and-degradation.md)
+  · [benchmark results](benchmarks/RESULTS.md#phase-7--what-leasing-bought-back)

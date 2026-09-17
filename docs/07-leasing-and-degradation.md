@@ -111,17 +111,81 @@ Over-admission when instances spend blocks leased just before a window boundary;
 under-admission when they hold blocks they never spend. Both are capped by the same
 quantity, and that quantity is **a number you choose**.
 
-That is the whole trade, and it is a dial rather than a compromise:
+The bound holds, and measuring it showed it is loose enough to be misleading on its own.
+Three instances, limit 100, 1000 attempts:
 
-| lease size | Redis calls per request | worst-case error, 3 instances |
-|---|---|---|
-| 1 | 1 | 0 — exactly Phase 6 |
-| 10 | ~0.1 | ±30 |
-| 100 | ~0.01 | ±300 |
+| load | lease 1 | lease 5 | lease 20 |
+|---|---|---|---|
+| **uniform** (round-robin) | 100/100 | 100/100 | 100/100 |
+| **skewed** (two instances get 5 requests, then go quiet) | 100/100 | 100/100 | **70/100** |
+
+Under even load leasing is **exactly correct** at every lease size — instances can only
+spend what the shared limiter granted, and even load means they spend all of it. The error
+appears only when an instance takes a block and then stops receiving traffic.
+
+The mechanism is precise. Each quiet instance received five requests. At lease size 5 it
+leased five and spent five, stranding nothing. At lease size 20 it leased twenty and spent
+five, stranding fifteen — twice over, for a shortfall of exactly 30. So the realised error
+is not `instances × leaseSize` but
+
+```
+Σ over instances of  max(0, leaseSize − requests that instance received)
+```
+
+Real traffic rarely approaches the worst case, where every instance takes a full lease and
+serves nothing. But that is still what a configuration must be safe against, which is what
+the sizing rule below is for.
+
+That is the whole trade, and it is a dial rather than a compromise. Measured against real
+Redis, one key, admit path:
+
+| lease size | ns/op | vs unleased | Redis calls per request | worst case, 3 instances |
+|---|---|---|---|---|
+| — (unleased) | 183,453 | 1× | 1 | 0 |
+| 1 | 184,296 | 1.00× | **1.000** | 0 — Phase 6 with 0.46% overhead |
+| 10 | 18,979 | **9.7×** | **0.1000** | ±30 |
+| 100 | 1,882 | **97×** | **0.01000** | ±300 |
+| 1000 | 272.1 | **674×** | **0.001000** | ±3000 |
+
+Calls per request land on exactly `1/leaseSize` at every step.
 
 At `leaseSize = 1` the leased limiter *is* the Redis limiter, with the local path never
-taken. Everything above 1 trades a measured, bounded inaccuracy for a proportional
-reduction in coordination.
+taken, and it costs less than half a percent to have the option. Everything above 1 trades
+a bounded inaccuracy for a proportional reduction in coordination.
+
+### The useful range is narrower than the table suggests
+
+| step | latency saved |
+|---|---|
+| 1 → 10 | 165,317 ns |
+| 10 → 100 | 17,097 ns |
+| 100 → 1000 | 1,610 ns |
+
+Each 10× increase saves 10× less latency while costing 10× more accuracy, so the
+benefit-to-cost ratio falls by **100× per step**. The last row of the table is a bad trade
+dressed up as a big number: 674× faster, and a worst-case error thirty times the limit
+itself.
+
+The floor is visible in the measurements. At lease size 1000 the amortised Redis cost is
+183 ns per request against a measured 272 ns — roughly **90 ns is the local path itself**,
+a `sync.Map` lookup, a mutex, and some arithmetic. Past that, larger leases buy accuracy
+loss in exchange for latency that is no longer there to recover.
+
+### Sizing it
+
+The worst case has to stay well under the thing being limited, or the guarantee is empty.
+At limit 100 across three instances, `leaseSize = 100` gives a bound of ±300: the possible
+error exceeds the limit. Even 20 gives ±60.
+
+A serviceable rule:
+
+```
+leaseSize  ≤  limit / (4 × instances)
+```
+
+which keeps the worst case under a quarter of the limit. For 100 requests/minute across
+three instances that is a lease of 8 — which the table above says still removes about 90%
+of the coordination.
 
 ---
 
@@ -155,6 +219,12 @@ the optimisation works when you do not need it and stops working when you do.
 So a refusal is remembered until the `RetryAfter` the shared limiter advertised. During
 that interval rejections are served locally, at local speed, with no network traffic at
 all. The system gets *quieter* under overload rather than louder.
+
+The effect is visible in the fleet measurements. At `leaseSize = 1` — where leasing itself
+does nothing, since every admission still costs a round trip — 1000 attempts against a
+limit of 100 cost **103 Redis calls**, not 1000: one hundred admissions, plus a single
+refusal per instance that every subsequent rejection is served from. Nine hundred rejected
+requests generated no network traffic at all.
 
 The cache is keyed by request size: a refusal of 30 units says nothing about whether one
 unit would be granted, so it only suppresses requests at least as large as the one refused.
