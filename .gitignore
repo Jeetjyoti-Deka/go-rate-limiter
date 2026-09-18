@@ -12,3 +12,6 @@
 *.out
 *.prof
 coverage.*
+
+# local blog drafts, published elsewhere
+/blog/

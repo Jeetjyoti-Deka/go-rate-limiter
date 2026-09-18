@@ -17,12 +17,12 @@ $ go test -tags brokenbydesign ./distributed/
 
 All five algorithms fail it identically, because the defect belongs to none of them.
 
-> **Status: in progress.** Phases 0–7 of 8 are complete — the `Limiter` contract, the
-> clock abstraction, the conformance suite every implementation is graded against, five
-> in-process algorithms, measured comparisons of both synchronisation strategy and
-> algorithm choice, the multi-instance break, a Redis-backed limiter that fixes it, and a
-> leasing layer that recovers most of what the fix cost. See [`PLAN.md`](PLAN.md) for the
-> full roadmap.
+> **Status: complete.** All eight phases — the `Limiter` contract, the conformance suite
+> every implementation is graded against, five in-process algorithms, measured comparisons
+> of both synchronisation strategy and algorithm choice, the multi-instance break, a
+> Redis-backed limiter that fixes it, a leasing layer that recovers most of what the fix
+> cost, and HTTP middleware. Each phase is tagged; [`PLAN.md`](PLAN.md) has the roadmap and
+> the design notes are in [`docs/`](docs/).
 
 Fixing it is not free. The same algorithm, with its state moved from this process into
 Redis on loopback, costs about **3,930×** the latency of a local decision.
@@ -103,7 +103,7 @@ are in the interface from the start.
 | 5 | The break: three instances, one limit, triple the traffic admitted | ✅ |
 | 6 | Redis-backed, atomically — why `GET`/`SET` is not enough | ✅ |
 | 7 | Quota leasing and degradation — fail-open vs fail-closed | ✅ |
-| 8 | HTTP middleware, docs, write-up | |
+| 8 | HTTP middleware, docs, write-up | ✅ |
 
 ## Running the tests
 
@@ -156,3 +156,4 @@ Design notes are written during each phase rather than after, and live in
   · [benchmark results](benchmarks/RESULTS.md#phase-6--what-coordination-costs)
 - [07 — Buying less coordination](docs/07-leasing-and-degradation.md)
   · [benchmark results](benchmarks/RESULTS.md#phase-7--what-leasing-bought-back)
+- [08 — Telling the client what happened](docs/08-middleware.md)
