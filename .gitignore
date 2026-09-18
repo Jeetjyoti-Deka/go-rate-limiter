@@ -1,7 +1,11 @@
-# binaries
+# Compiled binaries, which `go build ./cmd/...` drops in the repo root.
+#
+# The leading slash matters: unanchored, these patterns match at any depth and
+# match directories too, so they silently excluded cmd/demo-server/ and
+# cmd/loadgen/ from every commit up to Phase 7.
 /bin/
-demo-server
-loadgen
+/demo-server
+/loadgen
 
 # test & profile artifacts
 *.test
